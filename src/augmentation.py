@@ -1,4 +1,4 @@
-﻿"""
+"""
 augmentation.py
 ===============
 Data augmentation pipeline for the Diabetic Retinopathy Stage Detection project.
@@ -114,70 +114,104 @@ def count_class_samples_from_df(df: pd.DataFrame) -> Dict[int, int]:
 # ── Dataset augmentation ──────────────────────────────────────────────────────
 
 def augment_dataset(
-    proc_csv: Path = PROC_CSV_PATH,
+    splits_csv: Path = DATA_PROC_DIR / "splits.csv",
     out_dir: Path = DATA_AUG_DIR,
-    target_per_class: int = 3000,
+    target_per_class: int = 1000,
     pipeline: Optional[A.Compose] = None,
 ) -> None:
-    """Oversample minority classes until each has *target_per_class* images.
+    """Balance the training set to *target_per_class* images.
 
-    Reads labels from ``processed.csv`` (written by preprocessing.py).
-    Copies original preprocessed images and generates augmented variants
-    as needed.  Output is organised into ``<out_dir>/<label>/`` subfolders
-    so that Keras ``flow_from_directory()`` works in train.py.
+    Reads labels and splits from ``splits.csv``.
+    - Train split: undersamples Class 0, keeps Class 2, oversamples others to target.
+      Dropped images from undersampling are saved to ``<out_dir>/dropped/<label>/``.
+    - Val/Test splits: copied exactly as they are (real-world distribution).
+    
+    Output is organised into ``<out_dir>/<split>/<label>/`` subfolders.
 
     Args:
-        proc_csv:          Path to ``data/processed/processed.csv``.
+        splits_csv:        Path to ``data/processed/splits.csv``.
         out_dir:           Root directory for augmented output.
-        target_per_class:  Desired samples per class after balancing.
+        target_per_class:  Desired samples per class in the training set.
         pipeline:          Albumentations pipeline (defaults to training pipeline).
     """
-    if not proc_csv.exists():
+    if not splits_csv.exists():
         raise FileNotFoundError(
-            f"Processed CSV not found: {proc_csv}\n"
-            "Run src/preprocessing.py first."
+            f"Splits CSV not found: {splits_csv}\n"
+            "Run src/preprocessing.py and the EDA script first."
         )
 
     if pipeline is None:
         pipeline = get_train_augmentation_pipeline()
 
-    df = pd.read_csv(proc_csv)
+    df = pd.read_csv(splits_csv)
     out_dir.mkdir(parents=True, exist_ok=True)
+    
+    for split_name in ["train", "val", "test"]:
+        split_df = df[df["split"] == split_name]
+        
+        for label in sorted(split_df["diagnosis"].unique()):
+            class_df = split_df[split_df["diagnosis"] == label].reset_index(drop=True)
+            class_name = CLASS_NAMES[label]
+            current_count = len(class_df)
 
-    for label in sorted(df["diagnosis"].unique()):
-        class_df = df[df["diagnosis"] == label].reset_index(drop=True)
-        class_name = CLASS_NAMES[label]
-        current_count = len(class_df)
-
-        out_class_dir = out_dir / str(label)
-        out_class_dir.mkdir(parents=True, exist_ok=True)
-
-        print(f"Class {label} ({class_name}): {current_count} → {target_per_class}")
-
-        # ── Copy originals ──────────────────────────────────────────────────
-        for _, row in class_df.iterrows():
-            src = Path(row["filepath"])
-            dest = out_class_dir / src.name
-            if not dest.exists() and src.exists():
-                cv2.imwrite(str(dest), cv2.imread(str(src)))
-
-        # ── Augment to reach target ─────────────────────────────────────────
-        needed = max(0, target_per_class - current_count)
-        if needed == 0:
-            continue
-
-        np.random.seed(RANDOM_STATE)
-        for i in tqdm(range(needed), desc=f"Augmenting class {label}"):
-            row = class_df.iloc[i % current_count]
-            src_path = Path(row["filepath"])
-            if not src_path.exists():
+            out_class_dir = out_dir / split_name / str(label)
+            out_class_dir.mkdir(parents=True, exist_ok=True)
+            
+            if split_name != "train":
+                print(f"[{split_name.upper()}] Class {label} ({class_name}): {current_count} (no augmentation)")
+                for _, row in class_df.iterrows():
+                    src = Path(row["filepath"])
+                    dest = out_class_dir / src.name
+                    if not dest.exists() and src.exists():
+                        cv2.imwrite(str(dest), cv2.imread(str(src)))
                 continue
-            img = cv2.cvtColor(cv2.imread(str(src_path)), cv2.COLOR_BGR2RGB)
-            aug = augment_image(img, pipeline)
-            out_path = out_class_dir / f"aug_{i:05d}.png"
-            cv2.imwrite(str(out_path), cv2.cvtColor(aug, cv2.COLOR_RGB2BGR))
 
-    print(f"Augmented dataset saved to {out_dir}")
+            # Train split logic
+            print(f"[TRAIN] Class {label} ({class_name}): {current_count} -> {target_per_class}")
+            
+            # Undersampling (Class 0)
+            if current_count > target_per_class:
+                np.random.seed(RANDOM_STATE)
+                keep_indices = np.random.choice(current_count, target_per_class, replace=False)
+                keep_df = class_df.iloc[keep_indices]
+                drop_df = class_df.drop(keep_indices)
+                
+                for _, row in keep_df.iterrows():
+                    src = Path(row["filepath"])
+                    dest = out_class_dir / src.name
+                    if not dest.exists() and src.exists():
+                        cv2.imwrite(str(dest), cv2.imread(str(src)))
+                        
+                drop_dir = out_dir / "dropped" / str(label)
+                drop_dir.mkdir(parents=True, exist_ok=True)
+                for _, row in drop_df.iterrows():
+                    src = Path(row["filepath"])
+                    dest = drop_dir / src.name
+                    if not dest.exists() and src.exists():
+                        cv2.imwrite(str(dest), cv2.imread(str(src)))
+                        
+            else:
+                for _, row in class_df.iterrows():
+                    src = Path(row["filepath"])
+                    dest = out_class_dir / src.name
+                    if not dest.exists() and src.exists():
+                        cv2.imwrite(str(dest), cv2.imread(str(src)))
+                        
+                # Oversampling
+                needed = target_per_class - current_count
+                if needed > 0:
+                    np.random.seed(RANDOM_STATE)
+                    for i in tqdm(range(needed), desc=f"Augmenting class {label}"):
+                        row = class_df.iloc[i % current_count]
+                        src_path = Path(row["filepath"])
+                        if not src_path.exists():
+                            continue
+                        img = cv2.cvtColor(cv2.imread(str(src_path)), cv2.COLOR_BGR2RGB)
+                        aug = augment_image(img, pipeline)
+                        out_path = out_class_dir / f"aug_{i:05d}.png"
+                        cv2.imwrite(str(out_path), cv2.cvtColor(aug, cv2.COLOR_RGB2BGR))
+
+    print(f"Dataset saved to {out_dir}")
 
 
 # ── Visualisation ─────────────────────────────────────────────────────────────
