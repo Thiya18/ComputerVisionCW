@@ -1,4 +1,4 @@
-﻿"""
+"""
 train.py
 ========
 Training script for the Diabetic Retinopathy Stage Detection model.
@@ -57,45 +57,35 @@ def load_data(
     data_dir: Path = DATA_AUG_DIR,
     image_size: Tuple[int, int] = cfg.IMAGE_SIZE,
     batch_size: int = cfg.BATCH_SIZE,
-    val_split: float = cfg.VAL_RATIO,
 ) -> Tuple:
     """Create train and validation generators from the augmented dataset.
 
-    Reads the per-class subfolder structure produced by augmentation.py
-    (``data/augmented/<label>/``) using Keras ``flow_from_directory()``.
-    The validation split is taken from the already-augmented pool so the
-    class distribution remains balanced.
+    Reads from ``data/augmented/train/`` and ``data/augmented/val/``.
 
     Args:
-        data_dir:   Root directory with per-class (integer-named) subfolders.
+        data_dir:   Root directory containing train, val, and test subfolders.
         image_size: (H, W) tuple for input images.
         batch_size: Mini-batch size.
-        val_split:  Fraction of data to reserve for validation.
 
     Returns:
         Tuple of (train_generator, val_generator, train_class_labels_array).
     """
-    datagen = ImageDataGenerator(
-        preprocessing_function=_preprocess_fn,
-        validation_split=val_split,
-    )
+    datagen = ImageDataGenerator(preprocessing_function=_preprocess_fn)
 
     train_gen = datagen.flow_from_directory(
-        str(data_dir),
+        str(data_dir / "train"),
         target_size=image_size,
         batch_size=batch_size,
         class_mode="sparse",
-        subset="training",
         shuffle=True,
         seed=cfg.RANDOM_STATE,
     )
 
     val_gen = datagen.flow_from_directory(
-        str(data_dir),
+        str(data_dir / "val"),
         target_size=image_size,
         batch_size=batch_size,
         class_mode="sparse",
-        subset="validation",
         shuffle=False,
         seed=cfg.RANDOM_STATE,
     )

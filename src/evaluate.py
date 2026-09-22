@@ -1,4 +1,4 @@
-﻿"""
+"""
 evaluate.py
 ===========
 Model evaluation script for the Diabetic Retinopathy Stage Detection project.
@@ -70,34 +70,28 @@ def load_test_data(
     data_dir: Path = DATA_AUG_DIR,
     image_size: Tuple[int, int] = IMAGE_SIZE,
     batch_size: int = BATCH_SIZE,
-    test_split: float = cfg.TEST_RATIO,
 ) -> tf.keras.preprocessing.image.DirectoryIterator:
     """Create a test-set generator from the augmented dataset directory.
 
-    Uses ``flow_from_directory()`` on the ``data/augmented/<label>/``
-    structure — the same source as train.py — with a fixed validation
-    split acting as the held-out test set.  Shuffle is disabled to
-    ensure prediction order is deterministic.
+    Uses ``flow_from_directory()`` on the ``data/augmented/test/``
+    structure — the same source as train.py — which acts as the 
+    held-out test set.  Shuffle is disabled to ensure prediction 
+    order is deterministic.
 
     Args:
-        data_dir:   Root dir with per-class (integer-named) subfolders.
+        data_dir:   Root dir containing train, val, and test subfolders.
         image_size: (H, W) target size.
         batch_size: Mini-batch size.
-        test_split: Fraction to hold out for testing.
 
     Returns:
         A :class:`DirectoryIterator` over the test subset (no shuffle).
     """
-    datagen = ImageDataGenerator(
-        preprocessing_function=_preprocess_fn,
-        validation_split=test_split,
-    )
+    datagen = ImageDataGenerator(preprocessing_function=_preprocess_fn)
     return datagen.flow_from_directory(
-        str(data_dir),
+        str(data_dir / "test"),
         target_size=image_size,
         batch_size=batch_size,
         class_mode="sparse",
-        subset="validation",
         shuffle=False,
         seed=RANDOM_STATE,
     )
