@@ -13,7 +13,26 @@ working on this codebase.
 **Submission:** PDF report (≤ 20 pages) + codebase via Turnitin
 
 The goal is to build a **5-class CNN classifier** (No DR / Mild / Moderate / Severe / Proliferative DR)
-using transfer learning on a Kaggle fundus photography dataset.
+using transfer learning on the APTOS 2019 Blindness Detection dataset.
+
+---
+
+## Dataset Layout (APTOS 2019 Blindness Detection)
+
+> **Source:** https://www.kaggle.com/competitions/aptos2019-blindness-detection/data
+> (Manual download — NOT via the Kaggle CLI datasets command)
+
+| File / Folder | Location | Description |
+|---|---|---|
+| `train.csv` | `C:\Users\User\Downloads\train.csv` | Columns: `id_code` (filename stem), `diagnosis` (0–4) |
+| `train_images/` | `C:\Users\User\Downloads\train_images\` | **Flat** folder of PNG fundus images — no sub-directories |
+
+- **Classes:** 0 = No DR, 1 = Mild, 2 = Moderate, 3 = Severe, 4 = Proliferative DR
+- **Split:** 70% train / 15% validation / 15% test (stratified by label)
+- **Images:** Flat structure — labels come from CSV only, NOT from folder names
+
+> ⚠️ **The `data/` folder is gitignored.** Never commit images or CSV files into the repo.
+> All paths are configured in `src/config.py`.
 
 ---
 
@@ -35,11 +54,11 @@ using transfer learning on a Kaggle fundus photography dataset.
 
 ## Architecture Decisions
 
-- **Framework:** TensorFlow / Keras (preferred for deployment simplicity)
+- **Framework:** TensorFlow / Keras
 - **Base model:** EfficientNetB3 (best accuracy/size trade-off for medical imaging)
-- **Preprocessing:** CLAHE contrast enhancement → BGR→RGB → resize to 224×224 → ImageNet normalisation
+- **Preprocessing:** CLAHE → BGR→RGB → resize 224×224 → ImageNet normalisation
 - **Augmentation library:** `albumentations` (fast, composable, reproducible)
-- **Class imbalance strategy:** Class weights + augmentation of minority classes
+- **Class imbalance strategy:** Class weights + augmentation of minority classes to 3000 samples each
 - **Training:** Adam optimiser, ReduceLROnPlateau, EarlyStopping (patience=10), ModelCheckpoint
 - **Evaluation:** sklearn classification_report, seaborn heatmap confusion matrix
 
@@ -49,22 +68,34 @@ using transfer learning on a Kaggle fundus photography dataset.
 
 | File | Responsibility |
 |---|---|
-| `src/preprocessing.py` | `load_image()`, `apply_clahe()`, `resize_and_normalise()`, `preprocess_dataset()` |
-| `src/augmentation.py` | `get_augmentation_pipeline()`, `augment_dataset()`, `visualise_augmentations()` |
+| `src/config.py` | **Single source of truth** for all paths and hyperparameters |
+| `src/preprocessing.py` | `load_dataframe()`, `apply_clahe()`, `preprocess_image()`, `preprocess_dataset()` |
+| `src/augmentation.py` | `get_train_augmentation_pipeline()`, `augment_dataset()`, `plot_class_distribution()` |
 | `src/model.py` | `build_model()`, `unfreeze_top_layers()`, `get_callbacks()` |
 | `src/train.py` | `load_data()`, `compute_class_weights()`, `train()`, `save_history()` |
-| `src/evaluate.py` | `evaluate_model()`, `plot_curves()`, `plot_confusion_matrix()`, `generate_report()` |
+| `src/evaluate.py` | `evaluate_model()`, `plot_curves()`, `plot_confusion_matrix()`, `plot_roc_curves()` |
 | `app/` | Gradio/Streamlit demo UI — to be built after training |
 | `notebooks/` | Step-by-step EDA and experiment notebooks |
 
 ---
 
-## Dataset
+## Data Flow
 
-- **Source:** Kaggle — APTOS 2019 Blindness Detection or Diabetic Retinopathy Resized
-- **Classes:** 0 = No DR, 1 = Mild, 2 = Moderate, 3 = Severe, 4 = Proliferative DR
-- **Split:** 70% train / 15% validation / 15% test (stratified)
-- **Location:** `data/raw/` (gitignored — never commit images)
+```
+train.csv + train_images/  (C:\Users\User\Downloads\)
+        │
+        ▼
+src/preprocessing.py   →  data/processed/*.png  +  data/processed/processed.csv
+        │
+        ▼
+src/augmentation.py    →  data/augmented/<label>/*.png   (balanced, per-class subfolders)
+        │
+        ▼
+src/train.py           →  checkpoints/best_model.keras
+        │
+        ▼
+src/evaluate.py        →  reports/screenshots/evaluation/*.png
+```
 
 ---
 
@@ -73,7 +104,8 @@ using transfer learning on a Kaggle fundus photography dataset.
 - Python 3.10+
 - Type hints on all public functions
 - Google-style docstrings on every function
-- `random_state=42` for all stochastic operations (reproducibility)
+- `random_state=42` for all stochastic operations (see `config.RANDOM_STATE`)
+- Import `config as cfg` at the top of every module — never hardcode paths
 - Save all figures to `reports/screenshots/<subfolder>/` as PNG
 - Log training progress with `tqdm`
 
@@ -83,7 +115,7 @@ using transfer learning on a Kaggle fundus photography dataset.
 
 Screenshots must be saved to `reports/screenshots/` subfolders:
 
-- [ ] `dataset/` — class distribution bar chart, sample images per class
+- [ ] `dataset/` — class distribution bar chart (from `train.csv`), sample images per class
 - [ ] `preprocessing/` — before/after CLAHE, before/after normalisation
 - [ ] `augmentation/` — grid of augmented samples
 - [ ] `training/` — accuracy curve, loss curve, LR schedule

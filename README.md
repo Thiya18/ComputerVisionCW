@@ -2,7 +2,7 @@
 ### Computer Vision CW1 — BSc (Hons) Computer Science, BSCCOMP24.2P
 
 A deep learning pipeline that classifies **diabetic retinopathy severity** (5-class) from
-fundus photographs using transfer learning on a Kaggle dataset.
+fundus photographs using transfer learning on the APTOS 2019 Blindness Detection dataset.
 
 ---
 
@@ -11,23 +11,24 @@ fundus photographs using transfer learning on a Kaggle dataset.
 ```
 ComputerVisionCW/
 ├── data/                        # ← gitignored; never committed
-│   ├── raw/                     # Original Kaggle download
-│   └── processed/               # Preprocessed & augmented images
+│   ├── processed/               # Preprocessed images + processed.csv
+│   └── augmented/               # Balanced augmented images (per-class subfolders)
 ├── notebooks/                   # Exploratory analysis & step-by-step demos
 ├── src/                         # Production-quality Python modules
-│   ├── preprocessing.py         # Contrast, resizing, normalisation, edge enhancement
-│   ├── augmentation.py          # Rotation, flip, zoom, brightness augmentation
-│   ├── model.py                 # CNN + transfer learning architecture
-│   ├── train.py                 # Training loop, callbacks, LR scheduling
-│   └── evaluate.py              # Metrics, confusion matrix, curves
+│   ├── config.py                # ← All paths & hyperparameters (edit here first)
+│   ├── preprocessing.py         # Reads train.csv; CLAHE → denoise → sharpen → normalise
+│   ├── augmentation.py          # Reads processed.csv; albumentations balancing
+│   ├── model.py                 # EfficientNetB3 + custom head + callbacks
+│   ├── train.py                 # Two-stage training (frozen → fine-tune)
+│   └── evaluate.py              # Metrics, confusion matrix, ROC curves
 ├── app/                         # Gradio / Streamlit demo UI (Week 2+)
 ├── reports/
 │   └── screenshots/             # Evidence for the PDF report
-│       ├── dataset/
-│       ├── preprocessing/
-│       ├── augmentation/
-│       ├── training/
-│       └── evaluation/
+│       ├── dataset/             # Class distribution chart
+│       ├── preprocessing/       # Before/after CLAHE figures
+│       ├── augmentation/        # Augmentation grids
+│       ├── training/            # Accuracy & loss curves
+│       └── evaluation/          # Confusion matrix, ROC curves, classification report
 ├── docs/
 │   ├── assignment_brief.md      # Full rubric & module info
 │   └── assignment_brief.docx
@@ -35,6 +36,31 @@ ComputerVisionCW/
 ├── requirements.txt
 └── README.md
 ```
+
+---
+
+## Dataset
+
+**APTOS 2019 Blindness Detection** (manual Kaggle download)
+
+| File | Description |
+|---|---|
+| `train.csv` | `id_code` (filename stem) + `diagnosis` (label 0–4) |
+| `train_images/` | Flat folder of PNG retinal fundus photographs |
+
+> **Important:** These files live outside the repo (e.g. `C:\Users\User\Downloads\`).
+> Update `src/config.py` → `DATASET_ROOT` if your path differs.
+> **Never copy images into the repo** — `data/` is gitignored.
+
+### DR Class Labels
+
+| Code | Stage |
+|---|---|
+| 0 | No DR |
+| 1 | Mild |
+| 2 | Moderate |
+| 3 | Severe |
+| 4 | Proliferative DR |
 
 ---
 
@@ -46,17 +72,24 @@ git clone https://github.com/Thiya18/ComputerVisionCW.git
 cd ComputerVisionCW
 pip install -r requirements.txt
 
-# 2. Download dataset (requires Kaggle API key)
-kaggle datasets download -d tanlikesmath/diabetic-retinopathy-resized
-unzip diabetic-retinopathy-resized.zip -d data/raw/
+# 2. Download dataset from Kaggle
+#    https://www.kaggle.com/competitions/aptos2019-blindness-detection/data
+#    → Download train.csv and train_images.zip
+#    → Extract train_images.zip so train_images/ is a flat folder of PNGs
 
-# 3. Preprocess
+# 3. Edit config.py if your download path differs from the default
+#    DATASET_ROOT = Path(r"C:\Users\User\Downloads")
+
+# 4. Preprocess  (reads train.csv, writes data/processed/ + processed.csv)
 python src/preprocessing.py
 
-# 4. Train
+# 5. Augment & balance  (reads processed.csv, writes data/augmented/<label>/)
+python src/augmentation.py
+
+# 6. Train
 python src/train.py
 
-# 5. Evaluate
+# 7. Evaluate
 python src/evaluate.py
 ```
 

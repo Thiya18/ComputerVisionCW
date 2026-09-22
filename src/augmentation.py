@@ -3,8 +3,9 @@ augmentation.py
 ===============
 Data augmentation pipeline for the Diabetic Retinopathy Stage Detection project.
 
-Uses the `albumentations` library for fast, composable, reproducible augmentation.
-Addresses class imbalance by oversampling minority classes with augmented images.
+Dataset layout (APTOS 2019 Blindness Detection):
+    Labels are read from ``data/processed/processed.csv`` (written by preprocessing.py),
+    which has columns ``id_code``, ``diagnosis``, ``filepath``.
 
 Augmentation strategies:
     - Geometric: horizontal/vertical flip, rotation, zoom (scale), shift
@@ -12,38 +13,40 @@ Augmentation strategies:
     - Blur/noise: Gaussian blur, ISO noise
     - Advanced: GridDistortion (mimics retinal imaging artefacts)
 
+Augmented images are written to ``data/augmented/<label>/`` so that
+train.py can use ``flow_from_directory()`` on the balanced dataset.
+
 Usage:
     python src/augmentation.py
 """
 
-import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
 import cv2
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+import seaborn as sns
 import albumentations as A
-from pathlib import Path
 from tqdm import tqdm
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
+
+import config as cfg
 
 # ── Constants ────────────────────────────────────────────────────────────────
-RANDOM_STATE: int = 42
-IMAGE_SIZE: Tuple[int, int] = (224, 224)
-
-DATA_PROC_DIR   = Path("data/processed")
-DATA_AUG_DIR    = Path("data/augmented")
-SCREENSHOTS_DIR = Path("reports/screenshots/augmentation")
-
-# DR class labels (Kaggle APTOS convention)
-CLASS_LABELS: Dict[int, str] = {
-    0: "No DR",
-    1: "Mild",
-    2: "Moderate",
-    3: "Severe",
-    4: "Proliferative DR",
-}
+RANDOM_STATE    = cfg.RANDOM_STATE
+IMAGE_SIZE      = cfg.IMAGE_SIZE
+CLASS_NAMES     = cfg.CLASS_NAMES
+DATA_PROC_DIR   = cfg.DATA_PROC_DIR
+DATA_AUG_DIR    = cfg.DATA_AUG_DIR
+SCREENSHOTS_DIR = cfg.SS_AUGMENTATION
+PROC_CSV_PATH   = cfg.DATA_PROC_DIR / "processed.csv"
 
 
-# ── Augmentation pipeline ────────────────────────────────────────────────────
+# ── Augmentation pipelines ────────────────────────────────────────────────────
 
 def get_train_augmentation_pipeline() -> A.Compose:
     """Return the training augmentation pipeline (strong augmentation).
@@ -55,13 +58,15 @@ def get_train_augmentation_pipeline() -> A.Compose:
         A.HorizontalFlip(p=0.5),
         A.VerticalFlip(p=0.3),
         A.Rotate(limit=30, p=0.6),
-        A.ShiftScaleRotate(shift_limit=0.05, scale_limit=0.1,
-                           rotate_limit=15, p=0.5),
-        A.RandomBrightnessContrast(brightness_limit=0.2,
-                                   contrast_limit=0.2, p=0.5),
-        A.HueSaturationValue(hue_shift_limit=10,
-                             sat_shift_limit=20,
-                             val_shift_limit=10, p=0.3),
+        A.ShiftScaleRotate(
+            shift_limit=0.05, scale_limit=0.1, rotate_limit=15, p=0.5,
+        ),
+        A.RandomBrightnessContrast(
+            brightness_limit=0.2, contrast_limit=0.2, p=0.5,
+        ),
+        A.HueSaturationValue(
+            hue_shift_limit=10, sat_shift_limit=20, val_shift_limit=10, p=0.3,
+        ),
         A.GaussianBlur(blur_limit=(3, 5), p=0.2),
         A.ISONoise(p=0.2),
         A.GridDistortion(num_steps=5, distort_limit=0.1, p=0.2),
@@ -74,11 +79,9 @@ def get_val_augmentation_pipeline() -> A.Compose:
     """Return the validation/test augmentation pipeline (resize only).
 
     Returns:
-        An :class:`albumentations.Compose` transform with only resizing.
+        An :class:`albumentations.Compose` with only resizing.
     """
-    return A.Compose([
-        A.Resize(IMAGE_SIZE[0], IMAGE_SIZE[1]),
-    ])
+    return A.Compose([A.Resize(IMAGE_SIZE[0], IMAGE_SIZE[1])])
 
 
 def augment_image(image: np.ndarray, pipeline: A.Compose) -> np.ndarray:
@@ -91,85 +94,84 @@ def augment_image(image: np.ndarray, pipeline: A.Compose) -> np.ndarray:
     Returns:
         Augmented RGB image (uint8).
     """
-    result = pipeline(image=image)
-    return result["image"]
+    return pipeline(image=image)["image"]
 
 
-# ── Class-imbalance handling ─────────────────────────────────────────────────
+# ── CSV-based class counting ──────────────────────────────────────────────────
 
-def count_class_samples(data_dir: Path) -> Dict[int, int]:
-    """Count the number of image samples per class in *data_dir*.
-
-    Expects one subfolder per class named by its integer label (0–4).
+def count_class_samples_from_df(df: pd.DataFrame) -> Dict[int, int]:
+    """Count samples per class from a DataFrame.
 
     Args:
-        data_dir: Root directory with per-class subfolders.
+        df: DataFrame with a ``diagnosis`` column (integer 0–4).
 
     Returns:
         Dict mapping class index → sample count.
     """
-    image_extensions = {".jpg", ".jpeg", ".png"}
-    counts: Dict[int, int] = {}
-    for class_dir in sorted(data_dir.iterdir()):
-        if class_dir.is_dir() and class_dir.name.isdigit():
-            label = int(class_dir.name)
-            counts[label] = sum(
-                1 for f in class_dir.iterdir()
-                if f.suffix.lower() in image_extensions
-            )
-    return counts
+    return df["diagnosis"].value_counts().sort_index().to_dict()
 
+
+# ── Dataset augmentation ──────────────────────────────────────────────────────
 
 def augment_dataset(
-    proc_dir: Path = DATA_PROC_DIR,
+    proc_csv: Path = PROC_CSV_PATH,
     out_dir: Path = DATA_AUG_DIR,
     target_per_class: int = 3000,
-    pipeline: A.Compose | None = None,
+    pipeline: Optional[A.Compose] = None,
 ) -> None:
-    """Oversample minority classes using augmentation until *target_per_class*.
+    """Oversample minority classes until each has *target_per_class* images.
 
-    Copies majority-class images as-is; augments minority classes to reach
-    *target_per_class* samples each.
+    Reads labels from ``processed.csv`` (written by preprocessing.py).
+    Copies original preprocessed images and generates augmented variants
+    as needed.  Output is organised into ``<out_dir>/<label>/`` subfolders
+    so that Keras ``flow_from_directory()`` works in train.py.
 
     Args:
-        proc_dir:          Root dir with per-class preprocessed images.
-        out_dir:           Root dir where balanced images are saved.
-        target_per_class:  Desired number of samples per class after balancing.
+        proc_csv:          Path to ``data/processed/processed.csv``.
+        out_dir:           Root directory for augmented output.
+        target_per_class:  Desired samples per class after balancing.
         pipeline:          Albumentations pipeline (defaults to training pipeline).
     """
+    if not proc_csv.exists():
+        raise FileNotFoundError(
+            f"Processed CSV not found: {proc_csv}\n"
+            "Run src/preprocessing.py first."
+        )
+
     if pipeline is None:
         pipeline = get_train_augmentation_pipeline()
 
-    image_extensions = {".jpg", ".jpeg", ".png"}
+    df = pd.read_csv(proc_csv)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    for class_dir in sorted(proc_dir.iterdir()):
-        if not (class_dir.is_dir() and class_dir.name.isdigit()):
-            continue
-        label = class_dir.name
-        out_class_dir = out_dir / label
+    for label in sorted(df["diagnosis"].unique()):
+        class_df = df[df["diagnosis"] == label].reset_index(drop=True)
+        class_name = CLASS_NAMES[label]
+        current_count = len(class_df)
+
+        out_class_dir = out_dir / str(label)
         out_class_dir.mkdir(parents=True, exist_ok=True)
 
-        images = [f for f in class_dir.iterdir()
-                  if f.suffix.lower() in image_extensions]
-        current_count = len(images)
-        print(f"Class {label} ({CLASS_LABELS.get(int(label), '?')}): "
-              f"{current_count} → {target_per_class}")
+        print(f"Class {label} ({class_name}): {current_count} → {target_per_class}")
 
-        # Copy originals
-        for img_path in images:
-            dest = out_class_dir / img_path.name
-            if not dest.exists():
-                cv2.imwrite(
-                    str(dest),
-                    cv2.imread(str(img_path)),
-                )
+        # ── Copy originals ──────────────────────────────────────────────────
+        for _, row in class_df.iterrows():
+            src = Path(row["filepath"])
+            dest = out_class_dir / src.name
+            if not dest.exists() and src.exists():
+                cv2.imwrite(str(dest), cv2.imread(str(src)))
 
-        # Augment up to target
+        # ── Augment to reach target ─────────────────────────────────────────
         needed = max(0, target_per_class - current_count)
+        if needed == 0:
+            continue
+
         np.random.seed(RANDOM_STATE)
         for i in tqdm(range(needed), desc=f"Augmenting class {label}"):
-            src_path = images[i % current_count]
+            row = class_df.iloc[i % current_count]
+            src_path = Path(row["filepath"])
+            if not src_path.exists():
+                continue
             img = cv2.cvtColor(cv2.imread(str(src_path)), cv2.COLOR_BGR2RGB)
             aug = augment_image(img, pipeline)
             out_path = out_class_dir / f"aug_{i:05d}.png"
@@ -183,7 +185,7 @@ def augment_dataset(
 def visualise_augmentations(
     image_path: str | Path,
     n_variants: int = 8,
-    pipeline: A.Compose | None = None,
+    pipeline: Optional[A.Compose] = None,
     out_dir: Path = SCREENSHOTS_DIR,
 ) -> None:
     """Plot a grid of augmented variants of a single image and save as PNG.
@@ -199,8 +201,9 @@ def visualise_augmentations(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     img = cv2.cvtColor(cv2.imread(str(image_path)), cv2.COLOR_BGR2RGB)
+
     cols = 4
-    rows = (n_variants + 1 + cols - 1) // cols  # +1 for original
+    rows = (n_variants + 1 + cols - 1) // cols
     fig, axes = plt.subplots(rows, cols, figsize=(cols * 3, rows * 3))
     axes = axes.flatten()
 
@@ -227,21 +230,19 @@ def visualise_augmentations(
 
 
 def plot_class_distribution(
-    data_dir: Path,
-    title: str = "Class Distribution",
-    out_path: Path = Path("reports/screenshots/dataset/class_distribution.png"),
+    df: pd.DataFrame,
+    title: str = "Class Distribution (APTOS 2019)",
+    out_path: Path = cfg.SS_DATASET / "class_distribution.png",
 ) -> None:
-    """Plot and save a bar chart of per-class sample counts.
+    """Plot and save a bar chart of per-class sample counts from a DataFrame.
 
     Args:
-        data_dir:  Root directory with per-class subfolders.
-        title:     Chart title.
-        out_path:  Destination path for the saved PNG.
+        df:       DataFrame with a ``diagnosis`` column (integer 0–4).
+        title:    Chart title.
+        out_path: Destination path for the saved PNG.
     """
-    import seaborn as sns
-
-    counts = count_class_samples(data_dir)
-    labels = [CLASS_LABELS.get(k, str(k)) for k in sorted(counts)]
+    counts = count_class_samples_from_df(df)
+    labels = [CLASS_NAMES[k] for k in sorted(counts)]
     values = [counts[k] for k in sorted(counts)]
     colours = sns.color_palette("husl", len(labels))
 

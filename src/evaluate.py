@@ -3,18 +3,26 @@ evaluate.py
 ===========
 Model evaluation script for the Diabetic Retinopathy Stage Detection project.
 
+Dataset layout (APTOS 2019 Blindness Detection):
+    Uses ``data/augmented/<label>/`` (same structure as train.py) and holds
+    out a fixed test split for unbiased evaluation.
+
 Produces:
     - Classification report (precision, recall, F1-score per class)
-    - Confusion matrix heatmap
-    - Accuracy & loss curves (training vs. validation)
+    - Confusion matrix heatmap (counts + normalised)
+    - Accuracy & loss curves (combined stages 1 + 2)
     - ROC curves (one-vs-rest, per class)
-    - Per-class accuracy bar chart
 
-All figures are saved to reports/screenshots/evaluation/ as PNG files.
+All figures are saved to ``reports/screenshots/evaluation/`` as PNG files.
 
 Usage:
     python src/evaluate.py [--model checkpoints/best_model.keras]
 """
+
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
 
 import json
 import argparse
@@ -22,7 +30,6 @@ import numpy as np
 import matplotlib.pyplot as plt
 import seaborn as sns
 import tensorflow as tf
-from pathlib import Path
 from sklearn.metrics import (
     classification_report,
     confusion_matrix,
@@ -33,59 +40,56 @@ from sklearn.preprocessing import label_binarize
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from typing import Dict, List, Tuple
 
+import config as cfg
+
 # ── Constants ─────────────────────────────────────────────────────────────────
-CLASS_NAMES: List[str] = [
-    "No DR",
-    "Mild",
-    "Moderate",
-    "Severe",
-    "Proliferative DR",
-]
-NUM_CLASSES: int = len(CLASS_NAMES)
-IMAGE_SIZE:  Tuple[int, int] = (224, 224)
-BATCH_SIZE:  int = 32
-RANDOM_STATE: int = 42
+CLASS_NAMES    = cfg.CLASS_NAMES
+NUM_CLASSES    = cfg.NUM_CLASSES
+IMAGE_SIZE     = cfg.IMAGE_SIZE
+BATCH_SIZE     = cfg.BATCH_SIZE
+RANDOM_STATE   = cfg.RANDOM_STATE
 
-DATA_AUG_DIR   = Path("data/augmented")
-CHECKPOINT_DIR = Path("checkpoints")
-HISTORY_DIR    = Path("reports")
-EVAL_OUT_DIR   = Path("reports/screenshots/evaluation")
-TRAIN_OUT_DIR  = Path("reports/screenshots/training")
-
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+DATA_AUG_DIR   = cfg.DATA_AUG_DIR
+CHECKPOINT_DIR = cfg.CHECKPOINT_DIR
+HISTORY_DIR    = cfg.HISTORY_DIR
+EVAL_OUT_DIR   = cfg.SS_EVALUATION
+TRAIN_OUT_DIR  = cfg.SS_TRAINING
 
 
 # ── Data loader ───────────────────────────────────────────────────────────────
+
+def _preprocess_fn(image: tf.Tensor) -> tf.Tensor:
+    """Rescale and apply ImageNet normalisation (matches train.py)."""
+    image = tf.cast(image, tf.float32) / 255.0
+    mean = tf.constant(cfg.IMAGENET_MEAN, dtype=tf.float32)
+    std  = tf.constant(cfg.IMAGENET_STD,  dtype=tf.float32)
+    return (image - mean) / std
+
 
 def load_test_data(
     data_dir: Path = DATA_AUG_DIR,
     image_size: Tuple[int, int] = IMAGE_SIZE,
     batch_size: int = BATCH_SIZE,
-    test_split: float = 0.15,
+    test_split: float = cfg.TEST_RATIO,
 ) -> tf.keras.preprocessing.image.DirectoryIterator:
-    """Create a test-set generator (stratified, no shuffle).
+    """Create a test-set generator from the augmented dataset directory.
 
-    Uses a fixed validation_split of *test_split* as a proxy for a held-out
-    test set (consistent with the split used in train.py).
+    Uses ``flow_from_directory()`` on the ``data/augmented/<label>/``
+    structure — the same source as train.py — with a fixed validation
+    split acting as the held-out test set.  Shuffle is disabled to
+    ensure prediction order is deterministic.
 
     Args:
-        data_dir:   Root directory with per-class subfolders.
+        data_dir:   Root dir with per-class (integer-named) subfolders.
         image_size: (H, W) target size.
         batch_size: Mini-batch size.
         test_split: Fraction to hold out for testing.
 
     Returns:
-        A :class:`DirectoryIterator` over the test subset.
+        A :class:`DirectoryIterator` over the test subset (no shuffle).
     """
-    def preprocess_fn(image):
-        image = tf.cast(image, tf.float32) / 255.0
-        mean = tf.constant(IMAGENET_MEAN, dtype=tf.float32)
-        std  = tf.constant(IMAGENET_STD,  dtype=tf.float32)
-        return (image - mean) / std
-
     datagen = ImageDataGenerator(
-        preprocessing_function=preprocess_fn,
+        preprocessing_function=_preprocess_fn,
         validation_split=test_split,
     )
     return datagen.flow_from_directory(
@@ -99,7 +103,7 @@ def load_test_data(
     )
 
 
-# ── Prediction helpers ────────────────────────────────────────────────────────
+# ── Inference ─────────────────────────────────────────────────────────────────
 
 def get_predictions(
     model: tf.keras.Model,
@@ -117,19 +121,18 @@ def get_predictions(
     y_true: List[int] = []
     y_pred_probs_list: List[np.ndarray] = []
 
-    steps = len(generator)
-    for step in range(steps):
+    for step in range(len(generator)):
         x, y = generator[step]
         probs = model.predict(x, verbose=0)
         y_true.extend(y.astype(int).tolist())
         y_pred_probs_list.append(probs)
 
-    y_pred_probs = np.concatenate(y_pred_probs_list, axis=0)
+    y_pred_probs  = np.concatenate(y_pred_probs_list, axis=0)
     y_pred_labels = np.argmax(y_pred_probs, axis=1)
     return np.array(y_true), y_pred_labels, y_pred_probs
 
 
-# ── Plot functions ────────────────────────────────────────────────────────────
+# ── Plot helpers ──────────────────────────────────────────────────────────────
 
 def plot_confusion_matrix(
     y_true: np.ndarray,
@@ -146,7 +149,7 @@ def plot_confusion_matrix(
         out_dir:     Directory where the figure is saved.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    cm = confusion_matrix(y_true, y_pred)
+    cm      = confusion_matrix(y_true, y_pred)
     cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True)
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 6))
@@ -184,13 +187,15 @@ def plot_training_curves(
 ) -> None:
     """Plot accuracy and loss curves from saved JSON history files.
 
+    Concatenates stage-1 and stage-2 histories so the full training
+    trajectory is shown in a single figure.
+
     Args:
         history_paths: Paths to ``training_history.json`` files
                        (stage1 first, then stage2).
         out_dir:       Directory where the figure is saved.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-
     combined: Dict[str, List[float]] = {
         "accuracy": [], "val_accuracy": [],
         "loss":     [], "val_loss":     [],
@@ -204,16 +209,14 @@ def plot_training_curves(
     epochs = range(1, len(combined["accuracy"]) + 1)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
 
-    # Accuracy
-    ax1.plot(epochs, combined["accuracy"],     label="Train Accuracy", linewidth=2)
-    ax1.plot(epochs, combined["val_accuracy"], label="Val Accuracy",   linewidth=2, linestyle="--")
+    ax1.plot(epochs, combined["accuracy"],     label="Train", linewidth=2)
+    ax1.plot(epochs, combined["val_accuracy"], label="Val",   linewidth=2, linestyle="--")
     ax1.set_title("Accuracy over Epochs", fontsize=13, fontweight="bold")
     ax1.set_xlabel("Epoch"); ax1.set_ylabel("Accuracy")
     ax1.legend(); ax1.grid(True, alpha=0.4)
 
-    # Loss
-    ax2.plot(epochs, combined["loss"],     label="Train Loss", linewidth=2)
-    ax2.plot(epochs, combined["val_loss"], label="Val Loss",   linewidth=2, linestyle="--")
+    ax2.plot(epochs, combined["loss"],     label="Train", linewidth=2)
+    ax2.plot(epochs, combined["val_loss"], label="Val",   linewidth=2, linestyle="--")
     ax2.set_title("Loss over Epochs", fontsize=13, fontweight="bold")
     ax2.set_xlabel("Epoch"); ax2.set_ylabel("Loss")
     ax2.legend(); ax2.grid(True, alpha=0.4)
@@ -241,9 +244,9 @@ def plot_roc_curves(
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     n_classes = len(class_names)
-    y_bin = label_binarize(y_true, classes=list(range(n_classes)))
+    y_bin     = label_binarize(y_true, classes=list(range(n_classes)))
+    colours   = sns.color_palette("husl", n_classes)
 
-    colours = sns.color_palette("husl", n_classes)
     fig, ax = plt.subplots(figsize=(9, 7))
     for i, (name, colour) in enumerate(zip(class_names, colours)):
         fpr, tpr, _ = roc_curve(y_bin[:, i], y_pred_probs[:, i])
@@ -253,9 +256,10 @@ def plot_roc_curves(
 
     ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="Random classifier")
     ax.set_title("ROC Curves — One-vs-Rest", fontsize=13, fontweight="bold")
-    ax.set_xlabel("False Positive Rate"); ax.set_ylabel("True Positive Rate")
-    ax.legend(loc="lower right"); ax.grid(True, alpha=0.4)
-
+    ax.set_xlabel("False Positive Rate")
+    ax.set_ylabel("True Positive Rate")
+    ax.legend(loc="lower right")
+    ax.grid(True, alpha=0.4)
     plt.tight_layout()
     save_path = out_dir / "roc_curves.png"
     plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -277,7 +281,9 @@ def print_classification_report(
         class_names: List of class name strings.
         out_dir:     Directory where the text report is saved.
     """
-    report = classification_report(y_true, y_pred, target_names=class_names, digits=4)
+    report = classification_report(
+        y_true, y_pred, target_names=class_names, digits=4,
+    )
     print("\nClassification Report:\n")
     print(report)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -289,8 +295,10 @@ def print_classification_report(
 
 # ── Main evaluation routine ───────────────────────────────────────────────────
 
-def evaluate_model(model_path: Path = CHECKPOINT_DIR / "best_model.keras") -> None:
-    """Run the full evaluation pipeline on the test set.
+def evaluate_model(
+    model_path: Path = CHECKPOINT_DIR / "best_model.keras",
+) -> None:
+    """Run the full evaluation pipeline on the held-out test set.
 
     Args:
         model_path: Path to the saved Keras model (.keras file).
@@ -310,12 +318,10 @@ def evaluate_model(model_path: Path = CHECKPOINT_DIR / "best_model.keras") -> No
     print("Running inference …")
     y_true, y_pred, y_probs = get_predictions(model, test_gen)
 
-    # ── Evaluation outputs ─────────────────────────────────────────────────────
     print_classification_report(y_true, y_pred)
     plot_confusion_matrix(y_true, y_pred)
     plot_roc_curves(y_true, y_probs)
 
-    # ── Training curves (from saved history JSON) ──────────────────────────────
     history_paths = [
         HISTORY_DIR / "stage1" / "training_history.json",
         HISTORY_DIR / "stage2" / "training_history.json",

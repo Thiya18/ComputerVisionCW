@@ -3,82 +3,80 @@ train.py
 ========
 Training script for the Diabetic Retinopathy Stage Detection model.
 
+Dataset layout (APTOS 2019 Blindness Detection):
+    Reads from ``data/augmented/<label>/`` — the balanced, per-class
+    subfolder structure written by augmentation.py.
+    Labels originate from ``train.csv`` (via preprocessing.py → augmentation.py).
+
 Two-stage training strategy:
-    Stage 1 — Frozen base:  Train only the classification head (high LR, fast convergence).
-    Stage 2 — Fine-tuning:  Unfreeze top 30 layers of EfficientNetB3 (low LR, precision).
+    Stage 1 — Frozen base:  Train only the classification head (high LR).
+    Stage 2 — Fine-tuning:  Unfreeze top 30 layers of EfficientNetB3 (low LR).
 
 Usage:
     python src/train.py [--epochs 30] [--batch-size 32] [--finetune-epochs 20]
 """
 
-import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).parent))
+
 import json
 import argparse
 import numpy as np
 import tensorflow as tf
-from pathlib import Path
 from sklearn.utils.class_weight import compute_class_weight
 from tensorflow.keras.preprocessing.image import ImageDataGenerator
 from typing import Dict, Tuple
 
+import config as cfg
 from model import build_model, unfreeze_top_layers, get_callbacks
 
 # ── Reproducibility ───────────────────────────────────────────────────────────
-RANDOM_STATE: int = 42
-tf.random.set_seed(RANDOM_STATE)
-np.random.seed(RANDOM_STATE)
+tf.random.set_seed(cfg.RANDOM_STATE)
+np.random.seed(cfg.RANDOM_STATE)
 
-# ── Paths ─────────────────────────────────────────────────────────────────────
-DATA_AUG_DIR   = Path("data/augmented")
-CHECKPOINT_DIR = Path("checkpoints")
-LOG_DIR        = Path("logs")
-HISTORY_DIR    = Path("reports")
-
-# ── Defaults ──────────────────────────────────────────────────────────────────
-IMAGE_SIZE    = (224, 224)
-BATCH_SIZE    = 32
-EPOCHS_FROZEN = 30
-EPOCHS_FINETUNE = 20
-VALIDATION_SPLIT = 0.15
-NUM_CLASSES   = 5
-
-# ImageNet normalisation (must match preprocessing.py)
-IMAGENET_MEAN = [0.485, 0.456, 0.406]
-IMAGENET_STD  = [0.229, 0.224, 0.225]
+# ── Path aliases ──────────────────────────────────────────────────────────────
+DATA_AUG_DIR   = cfg.DATA_AUG_DIR
+CHECKPOINT_DIR = cfg.CHECKPOINT_DIR
+LOG_DIR        = cfg.LOG_DIR
+HISTORY_DIR    = cfg.HISTORY_DIR
 
 
 # ── Data loading ──────────────────────────────────────────────────────────────
 
+def _preprocess_fn(image: tf.Tensor) -> tf.Tensor:
+    """Rescale uint8 [0, 255] to float32 then apply ImageNet normalisation."""
+    image = tf.cast(image, tf.float32) / 255.0
+    mean = tf.constant(cfg.IMAGENET_MEAN, dtype=tf.float32)
+    std  = tf.constant(cfg.IMAGENET_STD,  dtype=tf.float32)
+    return (image - mean) / std
+
+
 def load_data(
     data_dir: Path = DATA_AUG_DIR,
-    image_size: Tuple[int, int] = IMAGE_SIZE,
-    batch_size: int = BATCH_SIZE,
-    val_split: float = VALIDATION_SPLIT,
-) -> Tuple[tf.data.Dataset, tf.data.Dataset, np.ndarray]:
-    """Create train and validation :class:`tf.data.Dataset` objects.
+    image_size: Tuple[int, int] = cfg.IMAGE_SIZE,
+    batch_size: int = cfg.BATCH_SIZE,
+    val_split: float = cfg.VAL_RATIO,
+) -> Tuple:
+    """Create train and validation generators from the augmented dataset.
 
-    Uses :class:`ImageDataGenerator` with the same normalisation applied
-    in preprocessing.py (ImageNet mean/std) and no extra augmentation
-    (augmentation was done offline in augmentation.py).
+    Reads the per-class subfolder structure produced by augmentation.py
+    (``data/augmented/<label>/``) using Keras ``flow_from_directory()``.
+    The validation split is taken from the already-augmented pool so the
+    class distribution remains balanced.
 
     Args:
-        data_dir:   Root directory with per-class subfolders.
+        data_dir:   Root directory with per-class (integer-named) subfolders.
         image_size: (H, W) tuple for input images.
         batch_size: Mini-batch size.
-        val_split:  Fraction of data to use for validation.
+        val_split:  Fraction of data to reserve for validation.
 
     Returns:
-        Tuple of (train_generator, val_generator, class_labels_array).
+        Tuple of (train_generator, val_generator, train_class_labels_array).
     """
-    def preprocess_fn(image):
-        """Rescale to [0,1] then apply ImageNet normalisation."""
-        image = tf.cast(image, tf.float32) / 255.0
-        mean = tf.constant(IMAGENET_MEAN, dtype=tf.float32)
-        std  = tf.constant(IMAGENET_STD,  dtype=tf.float32)
-        return (image - mean) / std
-
     datagen = ImageDataGenerator(
-        preprocessing_function=preprocess_fn,
+        preprocessing_function=_preprocess_fn,
         validation_split=val_split,
     )
 
@@ -89,7 +87,7 @@ def load_data(
         class_mode="sparse",
         subset="training",
         shuffle=True,
-        seed=RANDOM_STATE,
+        seed=cfg.RANDOM_STATE,
     )
 
     val_gen = datagen.flow_from_directory(
@@ -99,15 +97,14 @@ def load_data(
         class_mode="sparse",
         subset="validation",
         shuffle=False,
-        seed=RANDOM_STATE,
+        seed=cfg.RANDOM_STATE,
     )
 
-    labels = train_gen.classes
-    return train_gen, val_gen, labels
+    return train_gen, val_gen, train_gen.classes
 
 
 def compute_class_weights(labels: np.ndarray) -> Dict[int, float]:
-    """Compute balanced class weights to handle class imbalance.
+    """Compute balanced class weights to handle residual class imbalance.
 
     Args:
         labels: 1-D array of integer class labels from the training generator.
@@ -126,8 +123,11 @@ def compute_class_weights(labels: np.ndarray) -> Dict[int, float]:
     return class_weight_dict
 
 
-def save_history(history: tf.keras.callbacks.History, out_dir: Path = HISTORY_DIR) -> None:
-    """Save training history as a JSON file for later plotting.
+def save_history(
+    history: tf.keras.callbacks.History,
+    out_dir: Path = HISTORY_DIR,
+) -> None:
+    """Save training history dict as a JSON file for later plotting.
 
     Args:
         history: Keras History object returned by :meth:`model.fit`.
@@ -144,27 +144,27 @@ def save_history(history: tf.keras.callbacks.History, out_dir: Path = HISTORY_DI
 # ── Main training routine ─────────────────────────────────────────────────────
 
 def train(
-    epochs_frozen: int = EPOCHS_FROZEN,
-    epochs_finetune: int = EPOCHS_FINETUNE,
-    batch_size: int = BATCH_SIZE,
+    epochs_frozen: int = cfg.EPOCHS_FROZEN,
+    epochs_finetune: int = cfg.EPOCHS_FINETUNE,
+    batch_size: int = cfg.BATCH_SIZE,
 ) -> None:
     """Run the two-stage training pipeline.
 
-    Stage 1: Train classification head with frozen base.
-    Stage 2: Fine-tune top 30 layers of EfficientNetB3.
+    Stage 1: Train classification head with frozen EfficientNetB3 base.
+    Stage 2: Fine-tune top 30 layers with a 100x lower learning rate.
 
     Args:
         epochs_frozen:    Max epochs for stage-1 (frozen base).
         epochs_finetune:  Max epochs for stage-2 (fine-tuning).
         batch_size:       Mini-batch size.
     """
-    # ── Load data ──────────────────────────────────────────────────────────────
-    if not DATA_AUG_DIR.exists():
+    if not DATA_AUG_DIR.exists() or not any(DATA_AUG_DIR.iterdir()):
         raise RuntimeError(
-            f"Augmented data directory not found: {DATA_AUG_DIR}\n"
+            f"Augmented data not found at {DATA_AUG_DIR}.\n"
             "Run src/augmentation.py first."
         )
 
+    # ── Load data ──────────────────────────────────────────────────────────────
     train_gen, val_gen, labels = load_data(batch_size=batch_size)
     class_weights = compute_class_weights(labels)
 
@@ -185,7 +185,9 @@ def train(
     # ── Stage 2: Fine-tuning ───────────────────────────────────────────────────
     print("\n── Stage 2: Fine-tuning top layers of EfficientNetB3 ──")
     model = unfreeze_top_layers(model, n_layers=30)
-    callbacks_ft = get_callbacks(CHECKPOINT_DIR / "finetune", LOG_DIR / "finetune")
+    callbacks_ft = get_callbacks(
+        CHECKPOINT_DIR / "finetune", LOG_DIR / "finetune"
+    )
 
     history_2 = model.fit(
         train_gen,
@@ -208,14 +210,19 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Train the DR stage detection model (EfficientNetB3)."
     )
-    parser.add_argument("--epochs", type=int, default=EPOCHS_FROZEN,
-                        help="Max epochs for stage-1 frozen training.")
-    parser.add_argument("--finetune-epochs", type=int, default=EPOCHS_FINETUNE,
-                        help="Max epochs for stage-2 fine-tuning.")
-    parser.add_argument("--batch-size", type=int, default=BATCH_SIZE,
-                        help="Mini-batch size.")
+    parser.add_argument(
+        "--epochs", type=int, default=cfg.EPOCHS_FROZEN,
+        help="Max epochs for stage-1 frozen training.",
+    )
+    parser.add_argument(
+        "--finetune-epochs", type=int, default=cfg.EPOCHS_FINETUNE,
+        help="Max epochs for stage-2 fine-tuning.",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=cfg.BATCH_SIZE,
+        help="Mini-batch size.",
+    )
     args = parser.parse_args()
-
     train(
         epochs_frozen=args.epochs,
         epochs_finetune=args.finetune_epochs,

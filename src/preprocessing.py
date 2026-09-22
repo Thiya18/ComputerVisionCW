@@ -3,6 +3,10 @@ preprocessing.py
 ================
 Image preprocessing pipeline for the Diabetic Retinopathy Stage Detection project.
 
+Dataset layout (APTOS 2019 Blindness Detection):
+    <IMAGES_DIR>/         — flat folder of all retinal images
+    <CSV_PATH>            — CSV with columns `id_code` and `diagnosis` (0-4)
+
 Steps applied per image:
     1. Load image (BGR → RGB)
     2. Resize to target dimensions
@@ -15,25 +19,74 @@ Usage:
     python src/preprocessing.py
 """
 
-import os
+import sys
+from pathlib import Path
+
+# Allow sibling imports when running as __main__
+sys.path.insert(0, str(Path(__file__).parent))
+
 import cv2
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-from pathlib import Path
 from tqdm import tqdm
-from typing import Tuple, Optional
+from typing import Optional, Tuple
 
-# ── Constants ────────────────────────────────────────────────────────────────
-IMAGE_SIZE: Tuple[int, int] = (224, 224)
-IMAGENET_MEAN = np.array([0.485, 0.456, 0.406], dtype=np.float32)
-IMAGENET_STD  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+import config as cfg
 
-DATA_RAW_DIR  = Path("data/raw")
-DATA_PROC_DIR = Path("data/processed")
-SCREENSHOTS_DIR = Path("reports/screenshots/preprocessing")
+# ── Constants (re-exported from config for backward compatibility) ─────────────
+IMAGE_SIZE      = cfg.IMAGE_SIZE
+IMAGENET_MEAN   = np.array(cfg.IMAGENET_MEAN, dtype=np.float32)
+IMAGENET_STD    = np.array(cfg.IMAGENET_STD,  dtype=np.float32)
+CSV_PATH        = cfg.CSV_PATH
+IMAGES_DIR      = cfg.IMAGES_DIR
+DATA_PROC_DIR   = cfg.DATA_PROC_DIR
+SCREENSHOTS_DIR = cfg.SS_PREPROCESSING
 
 
-# ── Core functions ────────────────────────────────────────────────────────────
+# ── CSV / DataFrame helpers ───────────────────────────────────────────────────
+
+def load_dataframe(
+    csv_path: Path = CSV_PATH,
+    images_dir: Path = IMAGES_DIR,
+    ext: Optional[str] = None,
+) -> pd.DataFrame:
+    """Load ``train.csv`` and attach a resolved ``filepath`` column.
+
+    Args:
+        csv_path:   Path to the CSV file (columns: ``id_code``, ``diagnosis``).
+        images_dir: Directory containing the flat image files.
+        ext:        Image extension including the dot (e.g. ``".png"``).
+                    Auto-detected from *images_dir* when ``None``.
+
+    Returns:
+        DataFrame with columns: ``id_code``, ``diagnosis``, ``filepath``,
+        ``label`` (string class name).
+
+    Raises:
+        FileNotFoundError: If *csv_path* does not exist.
+    """
+    if not csv_path.exists():
+        raise FileNotFoundError(
+            f"CSV not found: {csv_path}\n"
+            "Download APTOS 2019 from Kaggle and place train.csv at that path."
+        )
+
+    if ext is None:
+        ext = cfg.detect_image_extension(images_dir)
+
+    df = pd.read_csv(csv_path)
+    df.rename(columns={"diagnosis": "diagnosis"}, inplace=True)  # normalise
+    df["filepath"] = df["id_code"].apply(
+        lambda code: str(images_dir / f"{code}{ext}")
+    )
+    df["label"] = df["diagnosis"].map(
+        {i: name for i, name in enumerate(cfg.CLASS_NAMES)}
+    )
+    return df
+
+
+# ── Core image functions ──────────────────────────────────────────────────────
 
 def load_image(path: str | Path) -> np.ndarray:
     """Load an image from disk and convert BGR → RGB.
@@ -61,7 +114,7 @@ def apply_clahe(
     """Apply CLAHE (Contrast Limited Adaptive Histogram Equalisation).
 
     Operates on the L (lightness) channel in LAB colour space to avoid
-    colour distortion.
+    colour distortion while enhancing contrast in fundus photographs.
 
     Args:
         image:          RGB image, uint8, shape (H, W, 3).
@@ -103,11 +156,13 @@ def sharpen_edges(image: np.ndarray, amount: float = 1.5) -> np.ndarray:
         Edge-enhanced RGB image (uint8).
     """
     blurred = cv2.GaussianBlur(image, (0, 0), sigmaX=3)
-    sharpened = cv2.addWeighted(image, 1 + amount, blurred, -amount, 0)
-    return sharpened
+    return cv2.addWeighted(image, 1 + amount, blurred, -amount, 0)
 
 
-def resize_image(image: np.ndarray, size: Tuple[int, int] = IMAGE_SIZE) -> np.ndarray:
+def resize_image(
+    image: np.ndarray,
+    size: Tuple[int, int] = IMAGE_SIZE,
+) -> np.ndarray:
     """Resize image to the target dimensions using Lanczos interpolation.
 
     Args:
@@ -137,7 +192,10 @@ def normalise(image: np.ndarray) -> np.ndarray:
     return img
 
 
-def preprocess_image(path: str | Path, size: Tuple[int, int] = IMAGE_SIZE) -> np.ndarray:
+def preprocess_image(
+    path: str | Path,
+    size: Tuple[int, int] = IMAGE_SIZE,
+) -> np.ndarray:
     """Full preprocessing pipeline for a single image.
 
     Pipeline: load → resize → CLAHE → denoise → sharpen → normalise
@@ -158,6 +216,8 @@ def preprocess_image(path: str | Path, size: Tuple[int, int] = IMAGE_SIZE) -> np
     return img
 
 
+# ── Visualisation ─────────────────────────────────────────────────────────────
+
 def save_before_after(
     original_path: str | Path,
     out_dir: Path = SCREENSHOTS_DIR,
@@ -168,21 +228,19 @@ def save_before_after(
     Args:
         original_path: Path to the raw input image.
         out_dir:       Directory where the figure is saved.
-        filename:      Output filename (defaults to stem of *original_path*).
+        filename:      Output filename stem (defaults to stem of *original_path*).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     original = load_image(original_path)
     original_resized = resize_image(original)
-    enhanced = apply_clahe(original_resized)
-    enhanced = remove_noise(enhanced)
-    enhanced = sharpen_edges(enhanced)
+    enhanced = sharpen_edges(remove_noise(apply_clahe(original_resized)))
 
     fig, axes = plt.subplots(1, 2, figsize=(10, 5))
     axes[0].imshow(original_resized)
-    axes[0].set_title("Original (resized)")
+    axes[0].set_title("Original (resized)", fontsize=11)
     axes[0].axis("off")
     axes[1].imshow(enhanced)
-    axes[1].set_title("After CLAHE + denoise + sharpen")
+    axes[1].set_title("After CLAHE + denoise + sharpen", fontsize=11)
     axes[1].axis("off")
     plt.suptitle("Preprocessing Pipeline", fontsize=14, fontweight="bold")
     plt.tight_layout()
@@ -194,44 +252,58 @@ def save_before_after(
     print(f"Saved: {save_path}")
 
 
+# ── Dataset-level processing ──────────────────────────────────────────────────
+
 def preprocess_dataset(
-    raw_dir: Path = DATA_RAW_DIR,
+    csv_path: Path = CSV_PATH,
+    images_dir: Path = IMAGES_DIR,
     out_dir: Path = DATA_PROC_DIR,
     size: Tuple[int, int] = IMAGE_SIZE,
 ) -> None:
-    """Preprocess all images in *raw_dir* and save to *out_dir*.
+    """Preprocess every image listed in *csv_path* and save to *out_dir*.
 
-    Preserves the subdirectory structure (one subfolder per class label).
+    Reads labels from ``train.csv`` (APTOS 2019 layout) rather than
+    inferring them from sub-directory names.  Saves preprocessed images
+    as ``<out_dir>/<id_code>.png`` and writes a ``processed.csv`` with
+    columns ``id_code``, ``diagnosis``, ``filepath`` for downstream use.
 
     Args:
-        raw_dir: Root directory containing per-class subfolders of raw images.
-        out_dir: Root directory where preprocessed images are saved.
-        size:    Target image size.
+        csv_path:   Path to the CSV file.
+        images_dir: Flat folder containing raw retinal images.
+        out_dir:    Directory where preprocessed images are saved.
+        size:       Target (width, height) for resizing.
     """
-    image_extensions = {".jpg", ".jpeg", ".png", ".tif", ".tiff"}
-    paths = [
-        p for p in raw_dir.rglob("*")
-        if p.suffix.lower() in image_extensions
-    ]
+    df = load_dataframe(csv_path, images_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    if not paths:
-        print(f"No images found in {raw_dir}. "
-              "Download the dataset first: kaggle datasets download ...")
-        return
+    processed_rows = []
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Preprocessing"):
+        src_path = Path(row["filepath"])
+        dest_path = out_dir / f"{row['id_code']}.png"
 
-    for path in tqdm(paths, desc="Preprocessing"):
-        relative = path.relative_to(raw_dir)
-        dest = out_dir / relative
-        dest.parent.mkdir(parents=True, exist_ok=True)
         try:
-            processed = preprocess_image(path, size)
-            # De-normalise for saving (save as uint8 PNG)
-            img_uint8 = ((processed * IMAGENET_STD + IMAGENET_MEAN) * 255).clip(0, 255).astype(np.uint8)
-            cv2.imwrite(str(dest.with_suffix(".png")), cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR))
+            processed = preprocess_image(src_path, size)
+            # De-normalise back to uint8 for disk storage
+            img_uint8 = (
+                (processed * IMAGENET_STD + IMAGENET_MEAN) * 255
+            ).clip(0, 255).astype(np.uint8)
+            cv2.imwrite(
+                str(dest_path),
+                cv2.cvtColor(img_uint8, cv2.COLOR_RGB2BGR),
+            )
+            processed_rows.append({
+                "id_code":   row["id_code"],
+                "diagnosis": row["diagnosis"],
+                "filepath":  str(dest_path),
+            })
         except Exception as exc:
-            print(f"Skipping {path}: {exc}")
+            print(f"Skipping {src_path.name}: {exc}")
 
-    print(f"Done. Preprocessed images saved to {out_dir}")
+    # Save a processed.csv so augmentation.py can pick up labels directly
+    out_csv = out_dir / "processed.csv"
+    pd.DataFrame(processed_rows).to_csv(out_csv, index=False)
+    print(f"Done. {len(processed_rows)} images saved to {out_dir}")
+    print(f"Label CSV written to {out_csv}")
 
 
 # ── Entry point ───────────────────────────────────────────────────────────────
