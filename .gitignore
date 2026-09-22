@@ -1,0 +1,45 @@
+﻿# ── Dataset & large files ───────────────────────────────────────────
+data/
+*.zip
+*.tar.gz
+*.h5
+*.hdf5
+*.keras
+*.pt
+*.pth
+*.onnx
+
+# ── Python ──────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+.env
+.venv
+venv/
+env/
+
+# ── Jupyter ─────────────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# ── ML artefacts ────────────────────────────────────────────────────
+runs/
+wandb/
+mlruns/
+checkpoints/
+saved_models/
+logs/
+
+# ── OS / IDE ────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# ── Kaggle credentials ──────────────────────────────────────────────
+kaggle.json
