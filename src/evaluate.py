@@ -316,10 +316,14 @@ def evaluate_model(
 
     print("Running inference …")
     y_true, y_pred, y_probs = get_predictions(model, test_gen)
+    
+    model_name = model_path.stem
+    out_dir = EVAL_OUT_DIR / model_name
+    out_dir.mkdir(parents=True, exist_ok=True)
 
-    print_classification_report(y_true, y_pred, class_names=dynamic_class_names)
-    plot_confusion_matrix(y_true, y_pred, class_names=dynamic_class_names)
-    plot_roc_curves(y_true, y_probs, class_names=dynamic_class_names)
+    print_classification_report(y_true, y_pred, class_names=dynamic_class_names, out_dir=out_dir)
+    plot_confusion_matrix(y_true, y_pred, class_names=dynamic_class_names, out_dir=out_dir)
+    plot_roc_curves(y_true, y_probs, class_names=dynamic_class_names, out_dir=out_dir)
 
     history_paths = [
         HISTORY_DIR / "stage1" / "training_history.json",
