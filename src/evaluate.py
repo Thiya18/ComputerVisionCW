@@ -290,7 +290,7 @@ def print_classification_report(
 # ── Main evaluation routine ───────────────────────────────────────────────────
 
 def evaluate_model(
-    model_path: Path = CHECKPOINT_DIR / "best_model.keras",
+    model_path: Path = cfg.FINAL_MODEL_PATH,
 ) -> None:
     """Run the full evaluation pipeline on the held-out test set.
 
@@ -347,7 +347,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model",
         type=Path,
-        default=CHECKPOINT_DIR / "best_model.keras",
+        default=cfg.FINAL_MODEL_PATH,
         help="Path to the saved Keras model file.",
     )
     args = parser.parse_args()

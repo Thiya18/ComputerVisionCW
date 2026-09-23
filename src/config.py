@@ -29,6 +29,7 @@ IMAGES_DIR: Path = DATASET_ROOT / "train_images"
 DATA_PROC_DIR:  Path = Path("data/processed")   # preprocessed images
 DATA_AUG_DIR:   Path = Path("data/augmented")   # augmented + balanced images
 CHECKPOINT_DIR: Path = Path("checkpoints")
+FINAL_MODEL_PATH: Path = CHECKPOINT_DIR / "final_model.keras"
 LOG_DIR:        Path = Path("logs")
 HISTORY_DIR:    Path = Path("reports")
 
