@@ -1,4 +1,4 @@
-﻿"""
+"""
 config.py
 =========
 Central configuration for all paths and shared hyperparameters.
@@ -14,7 +14,7 @@ from pathlib import Path
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Root folder of the APTOS 2019 dataset (flat structure from Kaggle download)
-DATASET_ROOT: Path = Path(r"C:\Users\User\Downloads")
+DATASET_ROOT: Path = Path("data/raw")
 
 # CSV file: columns `id_code` and `diagnosis`
 CSV_PATH: Path = DATASET_ROOT / "train.csv"
