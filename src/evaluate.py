@@ -309,12 +309,17 @@ def evaluate_model(
     print("Loading test data …")
     test_gen = load_test_data()
 
+    # Extract class names dynamically from the generator mapping
+    class_indices = test_gen.class_indices
+    dynamic_class_names = [k for k, v in sorted(class_indices.items(), key=lambda item: item[1])]
+    print(f"Detected class mapping: {class_indices}")
+
     print("Running inference …")
     y_true, y_pred, y_probs = get_predictions(model, test_gen)
 
-    print_classification_report(y_true, y_pred)
-    plot_confusion_matrix(y_true, y_pred)
-    plot_roc_curves(y_true, y_probs)
+    print_classification_report(y_true, y_pred, class_names=dynamic_class_names)
+    plot_confusion_matrix(y_true, y_pred, class_names=dynamic_class_names)
+    plot_roc_curves(y_true, y_probs, class_names=dynamic_class_names)
 
     history_paths = [
         HISTORY_DIR / "stage1" / "training_history.json",

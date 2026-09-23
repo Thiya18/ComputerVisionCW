@@ -156,6 +156,10 @@ def train(
 
     # ── Load data ──────────────────────────────────────────────────────────────
     train_gen, val_gen, labels = load_data(batch_size=batch_size)
+    
+    class_indices = train_gen.class_indices
+    print(f"Detected class mapping: {class_indices}")
+    
     class_weights = compute_class_weights(labels)
 
     # ── Stage 1: Frozen base ───────────────────────────────────────────────────

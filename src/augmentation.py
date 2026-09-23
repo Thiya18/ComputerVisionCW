@@ -151,10 +151,10 @@ def augment_dataset(
         
         for label in sorted(split_df["diagnosis"].unique()):
             class_df = split_df[split_df["diagnosis"] == label].reset_index(drop=True)
-            class_name = CLASS_NAMES[label]
+            class_name = CLASS_NAMES[label].replace(" ", "_")
             current_count = len(class_df)
 
-            out_class_dir = out_dir / split_name / str(label)
+            out_class_dir = out_dir / split_name / class_name
             out_class_dir.mkdir(parents=True, exist_ok=True)
             
             if split_name != "train":
@@ -182,7 +182,7 @@ def augment_dataset(
                     if not dest.exists() and src.exists():
                         cv2.imwrite(str(dest), cv2.imread(str(src)))
                         
-                drop_dir = out_dir / "dropped" / str(label)
+                drop_dir = out_dir / "dropped" / class_name
                 drop_dir.mkdir(parents=True, exist_ok=True)
                 for _, row in drop_df.iterrows():
                     src = Path(row["filepath"])
