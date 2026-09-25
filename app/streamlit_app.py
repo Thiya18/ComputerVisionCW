@@ -2,7 +2,7 @@
 streamlit_app.py
 ================
 Streamlit UI for Diabetic Retinopathy Stage Detection,
-with an educational Q&A chatbot section below predictions.
+with Grad-CAM explainability, pre-processing preview, and a chatbot Q&A.
 """
 
 import sys
@@ -20,11 +20,93 @@ from src.preprocessing import preprocess_image
 
 st.set_page_config(page_title="DR Stage Detection", page_icon="👁️", layout="centered")
 
+# ── Grad-CAM Explainability ───────────────────────────────────────────────────
+
+def make_gradcam_heatmap(img_tensor: np.ndarray, model: tf.keras.Model, pred_index: int = None) -> np.ndarray:
+    """
+    Generates a Grad-CAM heatmap by isolating the EfficientNetB3 base and custom head.
+    Dynamically finds the classification layers instead of relying on hardcoded names.
+    """
+    # 1. Extract the base model
+    base_model = model.get_layer("efficientnetb3")
+    
+    # Find the index of the base model in the full model's layers
+    base_model_idx = -1
+    for i, layer in enumerate(model.layers):
+        if layer.name == "efficientnetb3":
+            base_model_idx = i
+            break
+            
+    if base_model_idx == -1:
+        raise ValueError("Could not find 'efficientnetb3' layer in the model.")
+        
+    # 2. Build a sub-model for the classification head using all subsequent layers
+    top_input = tf.keras.Input(shape=base_model.output_shape[1:])
+    x = top_input
+    
+    # Iterate through all layers that come after the base model
+    for layer in model.layers[base_model_idx + 1:]:
+        x = layer(x)
+        
+    classifier_model = tf.keras.Model(top_input, x)
+
+    # 3. Compute gradients of the top predicted class wrt the base model's output feature map
+    with tf.GradientTape() as tape:
+        # Forward pass through base model
+        conv_outputs = base_model(img_tensor, training=False)
+        tape.watch(conv_outputs)
+        
+        # Forward pass through classifier
+        preds = classifier_model(conv_outputs, training=False)
+        
+        if pred_index is None:
+            pred_index = tf.argmax(preds[0])
+        class_channel = preds[:, pred_index]
+
+    # Compute gradients
+    grads = tape.gradient(class_channel, conv_outputs)
+
+    # Pool gradients over the spatial dimensions (H, W)
+    pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
+
+    # Weight the feature map channels by the pooled gradients
+    conv_outputs = conv_outputs[0]
+    heatmap = conv_outputs @ pooled_grads[..., tf.newaxis]
+    heatmap = tf.squeeze(heatmap)
+
+    # Normalize heatmap to [0, 1]
+    heatmap = tf.maximum(heatmap, 0)
+    max_val = tf.math.reduce_max(heatmap)
+    if max_val > 0:
+        heatmap = heatmap / max_val
+        
+    return heatmap.numpy()
+
+def overlay_heatmap(img: np.ndarray, heatmap: np.ndarray, alpha: float = 0.4, colormap=cv2.COLORMAP_JET) -> np.ndarray:
+    """
+    Overlays the Grad-CAM heatmap onto the original image.
+    img: original image array (RGB, uint8)
+    heatmap: 2D array of heatmap values in [0, 1]
+    """
+    # Rescale heatmap to a range 0-255
+    heatmap_uint8 = np.uint8(255 * heatmap)
+    
+    # Resize heatmap to match original image size
+    heatmap_resized = cv2.resize(heatmap_uint8, (img.shape[1], img.shape[0]))
+    
+    # Apply colormap and convert back to RGB for display
+    heatmap_colored = cv2.applyColorMap(heatmap_resized, colormap)
+    heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB) 
+    
+    # Superimpose the heatmap on original image
+    superimposed_img = cv2.addWeighted(heatmap_colored, alpha, img, 1 - alpha, 0)
+    return superimposed_img
+
 # ── Class mapping (alphabetical — matches flow_from_directory order) ──────────
 MODEL_CLASS_NAMES = ["Mild", "Moderate", "No_DR", "Proliferative_DR", "Severe"]
 
 # ── Per-class educational Q&A responses ──────────────────────────────────────
-CLASS_INFO: dict[str, dict[str, str]] = {
+CLASS_INFO = {
     "No_DR": {
         "what_does_it_mean": (
             "**No Diabetic Retinopathy (No DR)** means no visible signs of diabetic "
@@ -127,13 +209,11 @@ QUESTION_KEYS = {
     "How serious is this?":       "how_serious",
 }
 
-
 # ── Model loading (cached) ────────────────────────────────────────────────────
 @st.cache_resource
 def load_dr_model():
     """Load the final model from config path."""
     return tf.keras.models.load_model(str(cfg.FINAL_MODEL_PATH))
-
 
 model = load_dr_model()
 
@@ -154,36 +234,78 @@ st.markdown(
 uploaded_file = st.file_uploader("Choose an image (JPG/PNG)", type=["jpg", "jpeg", "png"])
 
 if uploaded_file is not None:
-    st.subheader("Uploaded Image")
+    st.subheader("Image Preprocessing Preview")
     image_pil = Image.open(uploaded_file).convert("RGB")
     image_np  = np.array(image_pil)
-    st.image(image_pil, use_column_width=True, caption="Original Upload")
+    
+    # Show before and after side-by-side
+    col1, col2 = st.columns(2)
+    with col1:
+        st.image(image_pil, use_column_width=True, caption="1. Original Upload")
 
-    with st.spinner("Processing image and predicting..."):
-        temp_path = Path("temp_upload.png")
-        cv2.imwrite(str(temp_path), cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR))
-        try:
-            processed_img = preprocess_image(temp_path)
-        finally:
-            if temp_path.exists():
-                temp_path.unlink()
+    with col2:
+        with st.spinner("Processing image and predicting..."):
+            temp_path = Path("temp_upload.png")
+            cv2.imwrite(str(temp_path), cv2.cvtColor(image_np, cv2.COLOR_RGB2BGR))
+            try:
+                processed_img = preprocess_image(temp_path)
+            finally:
+                if temp_path.exists():
+                    temp_path.unlink()
 
-        input_tensor = np.expand_dims(processed_img, axis=0)
-        probs        = model.predict(input_tensor)[0]
-        pred_idx     = int(np.argmax(probs))
-        pred_class   = MODEL_CLASS_NAMES[pred_idx]
+            # Reverse ImageNet normalization to display the preprocessed image properly
+            display_processed = (processed_img * cfg.IMAGENET_STD + cfg.IMAGENET_MEAN) * 255
+            display_processed = np.clip(display_processed, 0, 255).astype(np.uint8)
+            st.image(display_processed, use_column_width=True, caption="2. Preprocessed (CLAHE + Denoise + Sharpen)")
+
+            # Prediction
+            input_tensor = np.expand_dims(processed_img, axis=0)
+            probs        = model.predict(input_tensor)[0]
+            pred_idx     = int(np.argmax(probs))
+            pred_class   = MODEL_CLASS_NAMES[pred_idx]
+            max_prob     = float(probs[pred_idx])
 
     # Reset chat history when a new image produces a different prediction
     if pred_class != st.session_state.last_pred_class:
         st.session_state.chat_history    = []
         st.session_state.last_pred_class = pred_class
 
-    # ── Prediction results ────────────────────────────────────────────────────
-    st.subheader("Prediction Results")
-    st.success(f"**Predicted Stage:** {pred_class.replace('_', ' ')}")
-    st.write("**Confidence Scores:**")
-    for i, class_name in enumerate(MODEL_CLASS_NAMES):
-        st.progress(float(probs[i]), text=f"{class_name.replace('_', ' ')}: {probs[i]:.2%}")
+    # ── Prediction results & Grad-CAM ─────────────────────────────────────────
+    st.divider()
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        st.subheader("Prediction Results")
+        # Safety flag for low confidence predictions
+        if max_prob < 0.5:
+            st.warning(
+                f"⚠️ **Low confidence prediction ({max_prob:.1%})** — "
+                "manual specialist review is strongly recommended."
+            )
+            st.write(f"**Tentative Stage:** {pred_class.replace('_', ' ')}")
+        else:
+            st.success(f"**Predicted Stage:** {pred_class.replace('_', ' ')}")
+            
+        st.write("**Confidence Scores:**")
+        for i, class_name in enumerate(MODEL_CLASS_NAMES):
+            st.progress(float(probs[i]), text=f"{class_name.replace('_', ' ')}: {probs[i]:.2%}")
+
+    with col4:
+        st.subheader("Grad-CAM Explainability")
+        st.caption("Heatmap showing regions that most influenced this prediction.")
+        
+        try:
+            # Generate Grad-CAM heatmap
+            heatmap = make_gradcam_heatmap(input_tensor, model, pred_idx)
+            
+            # Overlay heatmap on the original image (resized to model dimensions)
+            orig_resized = cv2.resize(image_np, cfg.IMAGE_SIZE)
+            gradcam_img = overlay_heatmap(orig_resized, heatmap)
+            
+            st.image(gradcam_img, use_column_width=True, caption="Grad-CAM Overlay")
+        except Exception as e:
+            # Fallback if Grad-CAM generation fails for any reason
+            st.error(f"Grad-CAM unavailable: {str(e)}")
 
     # ── Chatbot section ───────────────────────────────────────────────────────
     st.divider()
