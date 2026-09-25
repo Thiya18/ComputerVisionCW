@@ -252,7 +252,7 @@ if uploaded_file is not None:
     # Show before and after side-by-side
     col1, col2 = st.columns(2)
     with col1:
-        st.image(image_pil, use_column_width=True, caption="1. Original Upload")
+        st.image(image_pil, use_container_width=True, caption="1. Original Upload")
 
     with col2:
         with st.spinner("Processing image and predicting..."):
@@ -267,7 +267,7 @@ if uploaded_file is not None:
             # Reverse ImageNet normalization to display the preprocessed image properly
             display_processed = (processed_img * cfg.IMAGENET_STD + cfg.IMAGENET_MEAN) * 255
             display_processed = np.clip(display_processed, 0, 255).astype(np.uint8)
-            st.image(display_processed, use_column_width=True, caption="2. Preprocessed (CLAHE + Denoise + Sharpen)")
+            st.image(display_processed, use_container_width=True, caption="2. Preprocessed (CLAHE + Denoise + Sharpen)")
 
             # Prediction
             input_tensor = np.expand_dims(processed_img, axis=0)
@@ -313,7 +313,7 @@ if uploaded_file is not None:
             orig_resized = cv2.resize(image_np, cfg.IMAGE_SIZE)
             gradcam_img = overlay_heatmap(orig_resized, heatmap)
             
-            st.image(gradcam_img, use_column_width=True, caption="Grad-CAM Overlay")
+            st.image(gradcam_img, use_container_width=True, caption="Grad-CAM Overlay")
         except Exception as e:
             # Fallback if Grad-CAM generation fails for any reason
             st.error(f"Grad-CAM unavailable: {str(e)}")
