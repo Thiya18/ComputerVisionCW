@@ -3,7 +3,7 @@ tensorflow>=2.13.0
 keras>=2.13.0
 
 # ── Computer Vision ─────────────────────────────────────────────────
-opencv-python>=4.8.0
+opencv-python-headless>=4.8.0
 Pillow>=10.0.0
 
 # ── Data Science ────────────────────────────────────────────────────
@@ -28,3 +28,4 @@ albumentations>=1.3.0
 
 # ── Web App ─────────────────────────────────────────────────────────
 streamlit>=1.20.0
+gdown>=5.1.0

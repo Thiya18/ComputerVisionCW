@@ -14,6 +14,7 @@ import tensorflow as tf
 import numpy as np
 import cv2
 from PIL import Image
+import gdown
 
 import src.config as cfg
 from src.preprocessing import preprocess_image
@@ -212,8 +213,18 @@ QUESTION_KEYS = {
 # ── Model loading (cached) ────────────────────────────────────────────────────
 @st.cache_resource
 def load_dr_model():
-    """Load the final model from config path."""
-    return tf.keras.models.load_model(str(cfg.FINAL_MODEL_PATH))
+    """Load the final model from config path, downloading from Google Drive if missing."""
+    model_path = Path(cfg.FINAL_MODEL_PATH)
+    
+    if not model_path.exists():
+        model_path.parent.mkdir(parents=True, exist_ok=True)
+        file_id = "1PlfXoaK7Tf3KxVRd0CqgfNLf3VEsAWmi"
+        url = f"https://drive.google.com/uc?id={file_id}"
+        
+        with st.spinner("Downloading model weights from Google Drive... (this may take a minute)"):
+            gdown.download(url, str(model_path), quiet=False)
+            
+    return tf.keras.models.load_model(str(model_path))
 
 model = load_dr_model()
 

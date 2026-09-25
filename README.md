@@ -1,4 +1,14 @@
-﻿# Diabetic Retinopathy Stage Detection
+---
+title: DR Stage Detection
+emoji: 👁️
+colorFrom: blue
+colorTo: indigo
+sdk: streamlit
+app_file: app/streamlit_app.py
+pinned: false
+---
+
+# Diabetic Retinopathy Stage Detection
 ### Computer Vision CW1 — BSc (Hons) Computer Science, BSCCOMP24.2P
 
 A deep learning pipeline that classifies **diabetic retinopathy severity** (5-class) from
